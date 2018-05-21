@@ -1,0 +1,280 @@
+"""Define convolution-based decoders."""
+
+import tensorflow as tf
+
+from opennmt.decoders.decoder import Decoder, get_embedding_fn
+from opennmt.layers.common import glu, reuse_variable
+from opennmt.layers.fconv import build_linear_weight_norm, build_conv1d_weight_norm, \
+    build_attention_layer, build_linear_shared_weights
+from opennmt.layers.position import LearnedPositionalEmbedding
+from opennmt.utils import beam_search
+
+
+class FConvDecoder(Decoder):
+  """Convolutional decoder as described in https://arxiv.org/abs/1705.03122."""
+
+  def __init__(self,
+               vocabulary_size,
+               embedding_dim=512,
+               out_embedding_dim=256,
+               convolutions=((512, 3),) * 20,
+               attention=True,
+               dropout=0.1,
+               position_encoder=LearnedPositionalEmbedding(left_pad=False),
+               share_embedding=False):
+    """Initializes the parameters of the decoder.
+
+    Args:
+        vocabulary_size: The output vocabulary size.
+        embedding_dim: Decoder embedding dimension.
+        out_embedding_dim: Decoder output embedding dimension.
+        convolutions: Decoder layers [(dim, kernel_size), ...].
+        attention: Decoder attention [True, ...].
+        dropout: The probability to drop units from the inputs.
+        position_encoder: The :class:`opennmt.convolutions.position.PositionEncoder` to
+        apply on inputs or ``None``.
+        share_embedding: Share input and output embeddings (requires decoder embedding dimension
+            and :obj:`out_embedding_dim` to be equal).
+    """
+    self.dropout = dropout
+    self.position_encoder = position_encoder
+
+    in_channels = convolutions[0][0]
+    if isinstance(attention, bool):
+      # expand True into [True, True, ...] and do the same with False
+      attention = [attention] * len(convolutions)
+    if not isinstance(attention, list) or len(attention) != len(convolutions):
+      raise ValueError('Attention is expected to be a list of booleans of '
+                       'length equal to the number of layers.')
+
+    self.fc1 = build_linear_weight_norm(
+        embedding_dim, in_channels, dropout=dropout, scope="proj_to_in_channels")
+    self.projections = list()
+    self.convolutions = list()
+    self.attention = list()
+    for i, (out_channels, kernel_size) in enumerate(convolutions):
+      self.projections.append(build_linear_weight_norm(in_channels, out_channels,
+                                                       scope="proj_layer_" + str(i))
+                              if in_channels != out_channels else None)
+      self.convolutions.append(
+          build_conv1d_weight_norm(in_channels, out_channels * 2, kernel_size,
+                                   padding=(kernel_size - 1),
+                                   dropout=dropout, scope="conv1d_layer_" + str(i)))
+      self.attention.append(build_attention_layer(out_channels, embedding_dim,
+                                                  scope="attention_" + str(i))
+                            if attention[i] else None)
+      in_channels = out_channels
+    self.fc2 = build_linear_weight_norm(
+        in_channels, out_embedding_dim, scope="proj_to_out_emb_dim")
+    if share_embedding:
+      assert out_embedding_dim == embedding_dim, \
+          "Shared embed weights implies same dimensions " \
+          " out_embed_dim={} vs embed_dim={}".format(
+              out_embedding_dim, embedding_dim)
+      w_emb = reuse_variable("w_embs")
+      self.fc3 = build_linear_shared_weights(vocabulary_size, w_emb)
+    else:
+      self.fc3 = build_linear_weight_norm(out_embedding_dim, vocabulary_size, dropout=dropout,
+                                          scope="proj_to_vocab_size")
+
+  def _init_cache(self, memory):
+
+    memory_shape = tf.shape(memory[0])
+    batch_size = memory_shape[0]
+    src_len = memory_shape[1]
+    cache = {
+        "memory": memory,
+        "avg_attn_score": tf.zeros([batch_size, 0, src_len])
+    }
+
+    return cache
+
+  def _symbols_to_logits_fn(self, embedding, mode):
+    embedding_fn = get_embedding_fn(embedding)
+
+    def _impl(ids, step, cache):
+      inputs = embedding_fn(ids[:, -1:])
+      if self.position_encoder is not None:
+        inputs = self.position_encoder.apply_one(inputs, step + 1)
+      outputs = self._cnn_stack(inputs, cache["memory"], mode, cache)
+      outputs = outputs[:, -1:, :]
+      logits = self.fc3(outputs)
+      return logits, cache
+
+    return _impl
+
+  def _cnn_stack(self, inputs, memory, mode, cache=None):
+    next_layer = inputs
+    num_attn_layers = len(self.attention)
+    next_layer = self.fc1(next_layer)
+
+    for l, (proj, conv, attention) in \
+            enumerate(zip(self.projections, self.convolutions, self.attention)):
+      residual = next_layer if proj is None else proj(next_layer)
+
+      next_layer = tf.layers.dropout(next_layer, self.dropout,
+                                     training=mode == tf.estimator.ModeKeys.TRAIN)
+      next_layer = conv(next_layer)
+      next_layer = glu(next_layer, axis=2)
+      if attention is not None:
+        next_layer, attn_score = attention(next_layer, inputs, memory)
+        if cache is not None:
+          attn_score /= num_attn_layers
+          if l == 0:
+            cache["avg_attn_score"] = tf.concat(
+                [cache["avg_attn_score"], attn_score], axis=1)
+          else:
+            cache["avg_attn_score"] += attn_score
+
+      next_layer = (next_layer + residual) * tf.sqrt(0.5)
+
+    next_layer = self.fc2(next_layer)
+    next_layer = tf.layers.dropout(next_layer, rate=self.dropout,
+                                   training=mode == tf.estimator.ModeKeys.TRAIN)
+
+    return next_layer
+
+  def decode(self,
+             inputs,
+             sequence_length,
+             vocab_size=None,
+             initial_state=None,
+             sampling_probability=None,
+             embedding=None,
+             unused_output_layer=None,
+             mode=tf.estimator.ModeKeys.TRAIN,
+             memory=None,
+             memory_sequence_length=None):
+    if sampling_probability is not None:
+      raise ValueError(
+          "Scheduled sampling is not supported with FairseqConvDecoder")
+
+    if self.position_encoder is not None:
+      inputs = self.position_encoder(inputs, sequence_length=sequence_length)
+
+    outputs = self._cnn_stack(inputs, memory, mode)
+
+    logits = self.fc3(outputs)
+
+    return (logits, None, sequence_length)
+
+  def dynamic_decode(self,
+                     embedding,
+                     start_tokens,
+                     end_token,
+                     vocab_size=None,
+                     initial_state=None,
+                     output_layer=None,
+                     maximum_iterations=250,
+                     mode=tf.estimator.ModeKeys.PREDICT,
+                     memory=None,
+                     memory_sequence_length=None,
+                     dtype=None,
+                     return_alignment_history=False):
+    batch_size = tf.shape(start_tokens)[0]
+    finished = tf.tile([False], [batch_size])
+    step = tf.constant(0)
+    inputs = tf.expand_dims(start_tokens, 1)
+    lengths = tf.zeros([batch_size], dtype=tf.int32)
+    log_probs = tf.zeros([batch_size])
+    cache = self._init_cache(memory)
+
+    symbols_to_logit_fn = self._symbols_to_logits_fn(
+        embedding, mode)
+
+    def _condition(unused_step, finished, unused_inputs, unused_lengths, unused_log_probs,
+                   unused_cache):
+      return tf.logical_not(tf.reduce_all(finished))
+
+    def _body(step, finished, inputs, lengths, log_probs, cache):
+      inputs_lengths = tf.add(lengths, 1 - tf.cast(finished, lengths.dtype))
+
+      logits, cache = symbols_to_logit_fn(inputs, step, cache)
+      probs = tf.nn.log_softmax(logits)
+      sample_ids = tf.argmax(probs, axis=-1)
+
+      # Accumulate log probabilities
+      sample_probs = tf.reduce_max(probs, axis=-1)
+      masked_probs = tf.squeeze(sample_probs, -1) * \
+          (1.0 - tf.cast(finished, sample_probs.dtype))
+      log_probs = tf.add(log_probs, masked_probs)
+
+      next_inputs = tf.concat([inputs, tf.cast(sample_ids, inputs.dtype)], -1)
+      next_lengths = inputs_lengths
+      next_finished = tf.logical_or(
+          finished,
+          tf.equal(tf.squeeze(sample_ids, axis=[1]), end_token))
+      step = step + 1
+
+      if maximum_iterations is not None:
+        next_finished = tf.logical_or(
+            next_finished, step >= maximum_iterations)
+
+      return step, next_finished, next_inputs, next_lengths, log_probs, cache
+
+    step, _, outputs, lengths, log_probs, cache = tf.while_loop(
+        _condition,
+        _body,
+        loop_vars=(step, finished, inputs, lengths, log_probs, cache),
+        shape_invariants=(
+            tf.TensorShape([]),
+            finished.get_shape(),
+            tf.TensorShape([None, None]),
+            lengths.get_shape(),
+            log_probs.get_shape(),
+            tf.contrib.framework.nest.map_structure(
+                beam_search.get_state_shape_invariants, cache)
+        ),
+        parallel_iterations=1)
+
+    outputs = tf.slice(outputs, [0, 1], [-1, -1])  # Ignore <s>
+
+    # Make shape consistent with beam search
+    outputs = tf.expand_dims(outputs, 1)
+    lengths = tf.expand_dims(lengths, 1)
+    log_probs = tf.expand_dims(log_probs, 1)
+
+    if return_alignment_history:
+      alignment_history = tf.expand_dims(cache["avg_attn_score"], 1)
+      return (outputs, None, lengths, log_probs, alignment_history)
+    return (outputs, None, lengths, log_probs)
+
+  def dynamic_decode_and_search(self,
+                                embedding,
+                                start_tokens,
+                                end_token,
+                                vocab_size=None,
+                                initial_state=None,
+                                output_layer=None,
+                                beam_width=5,
+                                length_penalty=0.0,
+                                maximum_iterations=250,
+                                mode=tf.estimator.ModeKeys.PREDICT,
+                                memory=None,
+                                memory_sequence_length=None,
+                                dtype=None,
+                                return_alignment_history=False):
+    cache = self._init_cache(memory)
+    symbols_to_logits_fn = self._symbols_to_logits_fn(
+        embedding, mode)
+
+    outputs, log_probs, cache = beam_search.beam_search(
+        symbols_to_logits_fn,
+        start_tokens,
+        beam_width,
+        maximum_iterations,
+        vocab_size,
+        length_penalty,
+        states=cache,
+        eos_id=end_token,
+        return_states=True)
+    outputs = tf.slice(outputs, [0, 0, 1], [-1, -1, -1])  # Ignore <s>.
+
+    lengths = tf.not_equal(outputs, 0)
+    lengths = tf.cast(lengths, tf.int32)
+    lengths = tf.reduce_sum(lengths, axis=-1)
+
+    if return_alignment_history:
+      alignment_history = cache["avg_attn_score"]
+      return (outputs, None, lengths, log_probs, alignment_history)
+    return (outputs, None, lengths, log_probs)

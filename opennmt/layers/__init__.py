@@ -9,5 +9,9 @@ from opennmt.layers.bridge import CopyBridge
 from opennmt.layers.bridge import ZeroBridge
 from opennmt.layers.bridge import DenseBridge
 
+from opennmt.layers.padding import Padding
+from opennmt.layers.weight_norm import WeightNorm
+
 from opennmt.layers.position import PositionEmbedder
+from opennmt.layers.position import LearnedPositionalEmbedding
 from opennmt.layers.position import SinusoidalPositionEncoder

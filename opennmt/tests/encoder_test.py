@@ -31,6 +31,20 @@ class EncoderTest(tf.test.TestCase):
       self.assertAllEqual([3, 21, 36], outputs.shape)
       self.assertAllEqual(sequence_length, encoded_length)
 
+  def testFConvEncoder(self):
+    sequence_length = [17, 21, 20]
+    inputs = _build_dummy_sequences(sequence_length, depth=10)
+    encoder = encoders.FConvEncoder(embedding_dim=10, convolutions=((256, 3),) * 10)
+    encoder.num_attention_layers = 3
+    outputs, _, encoded_length = encoder.encode(
+      inputs, sequence_length=tf.constant(sequence_length))
+    with self.test_session() as sess:
+      sess.run(tf.global_variables_initializer())
+      outputs, encoded_length = sess.run([outputs, encoded_length])
+      self.assertAllEqual([3, 21, 10], outputs[0].shape)
+      self.assertAllEqual([3, 21, 10], outputs[1].shape)
+      self.assertAllEqual(sequence_length, encoded_length)
+
   def testConvEncoder(self):
     sequence_length = [17, 21, 20]
     inputs = _build_dummy_sequences(sequence_length)

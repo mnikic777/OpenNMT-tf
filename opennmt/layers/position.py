@@ -7,7 +7,8 @@ import six
 import tensorflow as tf
 
 from opennmt.layers.reducer import SumReducer
-from opennmt.layers.common import embedding_lookup
+from opennmt.layers.common import embedding_lookup, scale_gradient
+from opennmt.layers.fconv import shift_padding_tokens_left
 
 
 def make_positions(sequence_length, maximum_length=None):
@@ -158,6 +159,47 @@ class PositionEmbedder(PositionEncoder):
     positions = tf.minimum(positions, self.maximum_position)
     embeddings = tf.get_variable(
         "w_embs", shape=[self.maximum_position + 1, depth], dtype=dtype)
+    return embedding_lookup(embeddings, positions)
+
+
+class LearnedPositionalEmbedding(PositionEncoder):
+  """Encodes position with a lookup table and ignores padding symbols."""
+
+  def __init__(self,
+               maximum_position=1024,
+               reducer=SumReducer(),
+               left_pad=True):
+    """Initializes the position encoder.
+
+  Args:
+      maximum_position: The maximum position to embed. Positions greater
+    than this value will be set to :obj:`maximum_position`.
+      reducer: A :class:`opennmt.layers.reducer.Reducer` to merge inputs and
+    position encodings.
+      left_pad: If true, padding is added on the left side; otherwise on the right side.
+  """
+    super(LearnedPositionalEmbedding, self).__init__(reducer=reducer)
+    self.maximum_position = maximum_position
+    self.left_pad = left_pad
+
+  def encode_sequence(self,
+                      sequence_length,
+                      depth,
+                      maximum_length=None,
+                      dtype=tf.float32):
+    positions = make_positions(sequence_length, maximum_length=maximum_length)
+    if self.left_pad:
+      positions = shift_padding_tokens_left(positions, sequence_length)
+    return self.encode(positions, depth, dtype=dtype)
+
+  def encode(self, positions, depth, dtype=tf.float32):
+    positions = tf.minimum(positions, self.maximum_position)
+    embeddings_grad_mask = tf.concat([tf.zeros(shape=[1, depth], dtype=dtype), tf.ones(
+        shape=[self.maximum_position, depth], dtype=dtype)], axis=0)
+    embeddings = tf.get_variable(
+        "w_embs", shape=[self.maximum_position + 1, depth], dtype=dtype)
+    # The gradient for vector at the position of padding is always zero.
+    embeddings = scale_gradient(embeddings, embeddings_grad_mask)
     return embedding_lookup(embeddings, positions)
 
 
