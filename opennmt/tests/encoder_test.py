@@ -34,7 +34,7 @@ class EncoderTest(tf.test.TestCase):
   def testFConvEncoder(self):
     sequence_length = [17, 21, 20]
     inputs = _build_dummy_sequences(sequence_length, depth=10)
-    encoder = encoders.FConvEncoder(embedding_dim=10, convolutions=((256, 3),) * 10)
+    encoder = encoders.FConvEncoder(convolutions=((256, 3),) * 10)
     encoder.num_attention_layers = 3
     outputs, _, encoded_length = encoder.encode(
       inputs, sequence_length=tf.constant(sequence_length))

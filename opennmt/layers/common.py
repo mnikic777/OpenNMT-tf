@@ -50,13 +50,14 @@ def glu(inputs, axis=-1):
 
 def scale_gradient(x, scale):
   """Scales gradient of :obj:`x` with :obj:`scale`."""
-  @function.Defun(
-      python_grad_func=lambda x, dy: dy * scale,
-      shape_func=lambda op: [op.inputs[0].get_shape()])
-  def _scale_grad(x):
-    return x
+  @tf.custom_gradient
+  def scale_grad_layer(x):
+    def grad(dy):
+      return scale * dy
 
-  return _scale_grad(x)
+    return tf.identity(x), grad
+
+  return scale_grad_layer(x)
 
 
 def reuse_variable(var, scope=None):
@@ -71,6 +72,7 @@ def reuse_variable(var, scope=None):
         The existing `Variable` (or `PartitionedVariable`, if a
         partitioner was used).
   """
-  with tf.variable_scope(scope, default_name="", reuse=True):
+  scope = "" if scope is None else scope
+  with tf.variable_scope(scope, reuse=True):
     v = tf.get_variable(var)
   return v

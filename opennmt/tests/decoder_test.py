@@ -171,7 +171,7 @@ class DecoderTest(tf.test.TestCase):
     self._testDecoder(decoder, support_alignment_history=False)
 
   def testFConvDecoder(self):
-    decoder = decoders.FConvDecoder(vocabulary_size=10, embedding_dim=6, out_embedding_dim=6,
+    decoder = decoders.FConvDecoder(out_embedding_dim=6,
                                     convolutions=((256, 3),) * 3, attention=True, dropout=0.1)
     self._testDecoder(decoder, support_alignment_history=True, memory_is_tuple=True)
 

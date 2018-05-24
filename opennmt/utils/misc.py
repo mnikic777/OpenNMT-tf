@@ -140,3 +140,18 @@ def get_dict_from_collection(collection_name):
   keys = tf.get_collection(key_collection)
   values = tf.get_collection(value_collection)
   return dict(zip(keys, values))
+
+def exclude_elements_from_list(original_list, to_exclude):
+  if isinstance(to_exclude, int):
+    to_exclude = [to_exclude]
+  """Filters out :obj:`orginal_list` based on list of
+  indices of elements that should be excluded.
+
+  Args:
+      original_list: A list of elements.
+      to_exclude: Index of element that should be exclude or list of indices.
+
+  Returns:
+    A list.
+  """
+  return [elem for i, elem in enumerate(original_list) if i not in to_exclude]

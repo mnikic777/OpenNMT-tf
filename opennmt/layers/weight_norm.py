@@ -1,8 +1,10 @@
 """Define Weight Normalization class."""
 
 import tensorflow as tf
-
 from tensorflow.python.layers import base
+
+from opennmt.utils.misc import exclude_elements_from_list
+
 
 
 class WeightNorm(base.Layer):
@@ -11,14 +13,7 @@ class WeightNorm(base.Layer):
   https://arxiv.org/abs/1602.07868"""
 
   def __init__(self, base_layer, kernel_name, axis, **kwargs):
-    """ Initializes a weight normalization layer.
-
-    Args:
-        base_layer: A layer whose weights need to be normalized.
-        kernel_name: Name of weight_parameter.
-        axis: The dimension over which to compute norm.
-        **kwargs: Additional keyword arguments.
-    """
+    """ Initializes a weight normalization layer."""
     super().__init__(**kwargs)
     self.base_layer = base_layer
     self.kernel_name = kernel_name
@@ -26,8 +21,10 @@ class WeightNorm(base.Layer):
 
   def build(self, input_shape):
     self.base_layer.build(input_shape)
+    self.base_layer.built = False
     normalized_kernel = self.normalize_variable(variable=getattr(
         self.base_layer, self.kernel_name), norm_axis=self.axis)
+    self.base_layer.built = True
     setattr(self.base_layer, self.kernel_name,
             normalized_kernel)
     self.built = True
@@ -37,6 +34,14 @@ class WeightNorm(base.Layer):
 
   def compute_output_shape(self, input_shape):
     return self.base_layer.compute_output_shape(input_shape)
+
+  @staticmethod
+  def _norm_initializer(variable, norm_axis):
+    """Initializer that generates a tensor with a norm of specified variable"""
+    def _initializer(unused_shape, dtype, partition_info):
+      return tf.norm(variable, axis=norm_axis)
+
+    return _initializer
 
   def normalize_variable(self, variable, norm_axis):
     """
@@ -49,11 +54,14 @@ class WeightNorm(base.Layer):
     Returns:
         Normalized variable.
     """
-    w_norm = tf.norm(variable.initialized_value(), axis=norm_axis)
-    g = self.add_variable(name='g', shape=None,
-                          dtype=tf.float32, initializer=w_norm, trainable=True)
+    norm_shape = exclude_elements_from_list(variable.get_shape().as_list(), norm_axis)
+    g = self.base_layer.add_variable(name='g',
+                                     shape=norm_shape,
+                                     dtype=tf.float32,
+                                     initializer=self._norm_initializer(variable, norm_axis),
+                                     trainable=True)
 
-    return variable * tf.div(g, tf.norm(variable, axis=norm_axis))
+    return variable * (g / tf.norm(variable, axis=norm_axis))
 
 
 def weight_norm(base_layer, kernel_name='kernel', axis=0, **kwargs):
@@ -64,7 +72,7 @@ def weight_norm(base_layer, kernel_name='kernel', axis=0, **kwargs):
   Args:
       base_layer: A layer whose weights need to be normalized.
       kernel_name: Name of weight_parameter.
-      axis: The dimension over which to compute norm.
+      axis: The dimension(s) over which to compute norm.
       **kwargs: Additional keyword arguments.
 
   Returns:

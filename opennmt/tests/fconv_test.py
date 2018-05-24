@@ -32,7 +32,7 @@ class FConvTest(tf.test.TestCase):
       output = sess.run(layer(inputs))
       self.assertAllEqual([batch_size, max_len, num_outputs], output.shape)
 
-  def testBuildConv1DWeightNorm(self):
+  def testConv1DWeightNorm(self):
     batch_size = 5
     max_len = 4
     num_inputs = 2
@@ -40,14 +40,14 @@ class FConvTest(tf.test.TestCase):
     num_outputs = 3
 
     inputs = tf.random_normal(shape=[batch_size, max_len, num_inputs])
-    layer = fconv.build_conv1d_weight_norm(
-        num_inputs, num_outputs, kernel_size)
+    layer = fconv.conv1d_weight_norm(
+        inputs, num_outputs, kernel_size)
     with self.test_session() as sess:
       sess.run(tf.global_variables_initializer())
-      output = sess.run(layer(inputs))
+      output = sess.run(layer)
       self.assertAllEqual([batch_size, max_len, num_outputs], output.shape)
 
-  def testBuildConv1DWeightNormWithCustomPadding(self):
+  def testConv1DWeightNormWithCustomPadding(self):
     batch_size = 5
     max_len = 4
     num_inputs = 2
@@ -56,14 +56,14 @@ class FConvTest(tf.test.TestCase):
     num_outputs = 3
 
     inputs = tf.random_normal(shape=[batch_size, max_len, num_inputs])
-    layer = fconv.build_conv1d_weight_norm(
-        num_inputs, num_outputs, kernel_size, padding=padding)
+    layer = fconv.conv1d_weight_norm(
+        inputs, num_outputs, kernel_size, padding=padding)
     with self.test_session() as sess:
       sess.run(tf.global_variables_initializer())
-      output = sess.run(layer(inputs))
+      output = sess.run(layer)
       self.assertAllEqual([batch_size, max_len, num_outputs], output.shape)
 
-  def testBuildAttentionLayer(self):
+  def testMultiStepAttention(self):
     batch_size = 5
     max_src_len = 3
     max_tgt_len = 4
@@ -86,11 +86,10 @@ class FConvTest(tf.test.TestCase):
                 max_src_len,
                 embedding_dim]))
 
-    layer = fconv.build_attention_layer(num_inputs, embedding_dim)
+    layer = fconv.multi_step_attention(inputs, target_embedding, encoder_outputs)
     with self.test_session() as sess:
       sess.run(tf.global_variables_initializer())
-      output, attn_score = sess.run(
-          layer(inputs, target_embedding, encoder_outputs))
+      output, attn_score = sess.run(layer)
       self.assertAllEqual([batch_size, max_tgt_len, num_inputs], output.shape)
       self.assertAllEqual(
           [batch_size, max_tgt_len, max_src_len], attn_score.shape)

@@ -10,7 +10,7 @@ from opennmt.models import SequenceToSequence
 from opennmt.layers.fconv import shift_padding_tokens_left
 
 
-def shift_source_sequence_left_pad(inputter, data):
+def shift_source_sequence(inputter, data):
   """Prepares shifted target sequences.
 Given a source sequence ``a b c``, the encoder input should be
 ``a b c </s>`` and also shifts padding tokens to the left side of source sequence.
@@ -30,12 +30,13 @@ Returns:
   ids = data["ids"]
   length = data["length"]
 
-  data = inputter.set_data_field(
-      data, "ids", shift_padding_tokens_left(ids, length))
   data = inputter.set_data_field(data, "ids", tf.concat([ids, eos], axis=0))
 
   # Increment length accordingly.
   inputter.set_data_field(data, "length", length + 1)
+
+  return data
+
 
 
 class FConvModel(SequenceToSequence):
@@ -80,25 +81,29 @@ class FConvModel(SequenceToSequence):
     constants.START_OF_SENTENCE_ID = constants.END_OF_SENTENCE_ID
     constants.START_OF_SENTENCE_TOKEN = constants.END_OF_SENTENCE_TOKEN
 
-    encoder = FConvEncoder(source_inputter.embedding_size,
-                           convolutions=encoder_convolutions,
-                           dropout=dropout,
-                           position_encoder=encoder_position_encoder)
-    decoder = FConvDecoder(target_inputter.vocabulary_size,
-                           embedding_dim=target_inputter.embedding_size,
-                           out_embedding_dim=out_embedding_dim,
-                           convolutions=decoder_convolutions,
-                           attention=attention,
-                           dropout=dropout,
-                           position_encoder=decoder_positon_encoder,
-                           share_embedding=share_embeddings)
+    with tf.variable_scope("encoder"):
+        encoder = FConvEncoder(convolutions=encoder_convolutions,
+                               dropout=dropout,
+                               position_encoder=encoder_position_encoder)
+    with tf.variable_scope("decoder"):
+        decoder = FConvDecoder(out_embedding_dim=out_embedding_dim,
+                               convolutions=decoder_convolutions,
+                               attention=attention,
+                               dropout=dropout,
+                               position_encoder=decoder_positon_encoder,
+                               share_embedding=share_embeddings)
     encoder.num_attention_layers = sum(
         layer is not None for layer in decoder.attention)
     super(FConvModel, self). __init__(source_inputter,
                                       target_inputter,
                                       encoder,
                                       decoder,
-                                      daisy_chain_variables=True,
+                                      daisy_chain_variables=False,
                                       name=name)
     self.source_inputter.add_process_hooks(
-        [shift_source_sequence_left_pad])
+        [shift_source_sequence])
+
+  def _build(self, features, labels, params, mode, config=None):
+    features_length = self._get_features_length(features)
+    features["ids"] = shift_padding_tokens_left(features["ids"], features_length)
+    return super(FConvModel, self)._build(features, labels, params, mode, config=config)

@@ -1,11 +1,10 @@
 """Define convolution-based decoders."""
 
 import tensorflow as tf
-
 from opennmt.decoders.decoder import Decoder, get_embedding_fn
 from opennmt.layers.common import glu, reuse_variable
-from opennmt.layers.fconv import build_linear_weight_norm, build_conv1d_weight_norm, \
-    build_attention_layer, build_linear_shared_weights
+from opennmt.layers.fconv import build_linear_weight_norm, build_linear_shared_weights,\
+    linear_weight_norm, conv1d_weight_norm, multi_step_attention
 from opennmt.layers.position import LearnedPositionalEmbedding
 from opennmt.utils import beam_search
 
@@ -14,8 +13,6 @@ class FConvDecoder(Decoder):
   """Convolutional decoder as described in https://arxiv.org/abs/1705.03122."""
 
   def __init__(self,
-               vocabulary_size,
-               embedding_dim=512,
                out_embedding_dim=256,
                convolutions=((512, 3),) * 20,
                attention=True,
@@ -25,8 +22,6 @@ class FConvDecoder(Decoder):
     """Initializes the parameters of the decoder.
 
     Args:
-        vocabulary_size: The output vocabulary size.
-        embedding_dim: Decoder embedding dimension.
         out_embedding_dim: Decoder output embedding dimension.
         convolutions: Decoder layers [(dim, kernel_size), ...].
         attention: Decoder attention [True, ...].
@@ -37,45 +32,18 @@ class FConvDecoder(Decoder):
             and :obj:`out_embedding_dim` to be equal).
     """
     self.dropout = dropout
+    self.convolutions = convolutions
     self.position_encoder = position_encoder
+    self.out_embedding_dim = out_embedding_dim
+    self.share_embedding = share_embedding
 
-    in_channels = convolutions[0][0]
     if isinstance(attention, bool):
       # expand True into [True, True, ...] and do the same with False
       attention = [attention] * len(convolutions)
     if not isinstance(attention, list) or len(attention) != len(convolutions):
       raise ValueError('Attention is expected to be a list of booleans of '
                        'length equal to the number of layers.')
-
-    self.fc1 = build_linear_weight_norm(
-        embedding_dim, in_channels, dropout=dropout, scope="proj_to_in_channels")
-    self.projections = list()
-    self.convolutions = list()
-    self.attention = list()
-    for i, (out_channels, kernel_size) in enumerate(convolutions):
-      self.projections.append(build_linear_weight_norm(in_channels, out_channels,
-                                                       scope="proj_layer_" + str(i))
-                              if in_channels != out_channels else None)
-      self.convolutions.append(
-          build_conv1d_weight_norm(in_channels, out_channels * 2, kernel_size,
-                                   padding=(kernel_size - 1),
-                                   dropout=dropout, scope="conv1d_layer_" + str(i)))
-      self.attention.append(build_attention_layer(out_channels, embedding_dim,
-                                                  scope="attention_" + str(i))
-                            if attention[i] else None)
-      in_channels = out_channels
-    self.fc2 = build_linear_weight_norm(
-        in_channels, out_embedding_dim, scope="proj_to_out_emb_dim")
-    if share_embedding:
-      assert out_embedding_dim == embedding_dim, \
-          "Shared embed weights implies same dimensions " \
-          " out_embed_dim={} vs embed_dim={}".format(
-              out_embedding_dim, embedding_dim)
-      w_emb = reuse_variable("w_embs")
-      self.fc3 = build_linear_shared_weights(vocabulary_size, w_emb)
-    else:
-      self.fc3 = build_linear_weight_norm(out_embedding_dim, vocabulary_size, dropout=dropout,
-                                          scope="proj_to_vocab_size")
+    self.attention = attention
 
   def _init_cache(self, memory):
 
@@ -89,8 +57,17 @@ class FConvDecoder(Decoder):
 
     return cache
 
-  def _symbols_to_logits_fn(self, embedding, mode):
+  def _symbols_to_logits_fn(self, embedding, vocab_size, mode, output_layer=None, dtype=None):
     embedding_fn = get_embedding_fn(embedding)
+    if self.share_embedding:
+      w_embs = reuse_variable("w_embs")
+      output_layer = build_linear_shared_weights(
+          vocab_size, w_embs, scope="proj_to_vocab_size")
+    elif output_layer is None:
+      output_layer = build_linear_weight_norm(self.out_embedding_dim, vocab_size,
+                                              dropout=self.dropout,
+                                              dtype=dtype,
+                                              scope="proj_to_vocab_size")
 
     def _impl(ids, step, cache):
       inputs = embedding_fn(ids[:, -1:])
@@ -98,37 +75,41 @@ class FConvDecoder(Decoder):
         inputs = self.position_encoder.apply_one(inputs, step + 1)
       outputs = self._cnn_stack(inputs, cache["memory"], mode, cache)
       outputs = outputs[:, -1:, :]
-      logits = self.fc3(outputs)
+      logits = output_layer(outputs)
       return logits, cache
 
     return _impl
 
   def _cnn_stack(self, inputs, memory, mode, cache=None):
+    in_channels = self.convolutions[0][0]
     next_layer = inputs
     num_attn_layers = len(self.attention)
-    next_layer = self.fc1(next_layer)
+    next_layer = linear_weight_norm(next_layer, in_channels, dropout=self.dropout,
+                                    scope="in_projection")
+    for i, (out_channels, kernel_size) in enumerate(self.convolutions):
+      with tf.variable_scope("layer_{}".format(i)):
+        residual = next_layer if in_channels == out_channels else linear_weight_norm(next_layer, out_channels)
 
-    for l, (proj, conv, attention) in \
-            enumerate(zip(self.projections, self.convolutions, self.attention)):
-      residual = next_layer if proj is None else proj(next_layer)
+        next_layer = tf.layers.dropout(next_layer, self.dropout,
+                                       training=mode == tf.estimator.ModeKeys.TRAIN)
+        next_layer = conv1d_weight_norm(next_layer, out_channels * 2, kernel_size,
+                                        padding=(kernel_size - 1),
+                                        dropout=self.dropout)
+        next_layer = glu(next_layer, axis=2)
+        if self.attention[i]:
+          next_layer, attn_score = multi_step_attention(next_layer, inputs, memory)
+          if cache is not None:
+            attn_score /= num_attn_layers
+            if i == 0:
+              cache["avg_attn_score"] = tf.concat(
+                  [cache["avg_attn_score"], attn_score], axis=1)
+            else:
+              cache["avg_attn_score"] += attn_score
 
-      next_layer = tf.layers.dropout(next_layer, self.dropout,
-                                     training=mode == tf.estimator.ModeKeys.TRAIN)
-      next_layer = conv(next_layer)
-      next_layer = glu(next_layer, axis=2)
-      if attention is not None:
-        next_layer, attn_score = attention(next_layer, inputs, memory)
-        if cache is not None:
-          attn_score /= num_attn_layers
-          if l == 0:
-            cache["avg_attn_score"] = tf.concat(
-                [cache["avg_attn_score"], attn_score], axis=1)
-          else:
-            cache["avg_attn_score"] += attn_score
+        next_layer = (next_layer + residual) * tf.sqrt(0.5)
 
-      next_layer = (next_layer + residual) * tf.sqrt(0.5)
-
-    next_layer = self.fc2(next_layer)
+    next_layer = linear_weight_norm(next_layer, self.out_embedding_dim,
+                                    scope="out_projection")
     next_layer = tf.layers.dropout(next_layer, rate=self.dropout,
                                    training=mode == tf.estimator.ModeKeys.TRAIN)
 
@@ -141,7 +122,7 @@ class FConvDecoder(Decoder):
              initial_state=None,
              sampling_probability=None,
              embedding=None,
-             unused_output_layer=None,
+             output_layer=None,
              mode=tf.estimator.ModeKeys.TRAIN,
              memory=None,
              memory_sequence_length=None):
@@ -154,7 +135,17 @@ class FConvDecoder(Decoder):
 
     outputs = self._cnn_stack(inputs, memory, mode)
 
-    logits = self.fc3(outputs)
+    if self.share_embedding:
+      w_embs = reuse_variable("w_embs")
+      output_layer = build_linear_shared_weights(
+          vocab_size, w_embs, scope="proj_to_vocab_size")
+    elif output_layer is None:
+      output_layer = build_linear_weight_norm(self.out_embedding_dim, vocab_size,
+                                              dropout=self.dropout,
+                                              dtype=inputs.dtype,
+                                              scope="proj_to_vocab_size")
+
+    logits = output_layer(outputs)  # fc3
 
     return (logits, None, sequence_length)
 
@@ -179,8 +170,8 @@ class FConvDecoder(Decoder):
     log_probs = tf.zeros([batch_size])
     cache = self._init_cache(memory)
 
-    symbols_to_logit_fn = self._symbols_to_logits_fn(
-        embedding, mode)
+    symbols_to_logits_fn = self._symbols_to_logits_fn(
+        embedding, vocab_size, mode, output_layer=output_layer, dtype=dtype)
 
     def _condition(unused_step, finished, unused_inputs, unused_lengths, unused_log_probs,
                    unused_cache):
@@ -189,7 +180,7 @@ class FConvDecoder(Decoder):
     def _body(step, finished, inputs, lengths, log_probs, cache):
       inputs_lengths = tf.add(lengths, 1 - tf.cast(finished, lengths.dtype))
 
-      logits, cache = symbols_to_logit_fn(inputs, step, cache)
+      logits, cache = symbols_to_logits_fn(inputs, step, cache)
       probs = tf.nn.log_softmax(logits)
       sample_ids = tf.argmax(probs, axis=-1)
 
@@ -256,7 +247,7 @@ class FConvDecoder(Decoder):
                                 return_alignment_history=False):
     cache = self._init_cache(memory)
     symbols_to_logits_fn = self._symbols_to_logits_fn(
-        embedding, mode)
+        embedding, vocab_size, mode, output_layer=output_layer, dtype=dtype)
 
     outputs, log_probs, cache = beam_search.beam_search(
         symbols_to_logits_fn,
