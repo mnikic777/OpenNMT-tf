@@ -48,16 +48,29 @@ def glu(inputs, axis=-1):
   return tf.multiply(a, b)
 
 
-def scale_gradient(x, scale):
+def scale_gradient(inputs, scale):
   """Scales gradient of :obj:`x` with :obj:`scale`."""
-  @tf.custom_gradient
-  def scale_grad_layer(x):
-    def grad(dy):
-      return scale * dy
+  dtype = inputs.dtype.base_dtype
+  scale = tf.convert_to_tensor(scale, dtype=dtype)
+  def backward_op(op, dy):
+    return op.inputs[1] * dy, None
 
-    return tf.identity(x), grad
+  def forward_op(x, scale):
+    del scale
+    return x
 
-  return scale_grad_layer(x)
+  def shape_op(op):
+    return [op.inputs[0].get_shape()]
+
+  _scale_func = function.Defun(
+    dtype, dtype,
+    python_grad_func=backward_op,
+    shape_func=shape_op
+  )(forward_op)
+
+  output = _scale_func(inputs, scale)
+  output.set_shape(inputs.get_shape())
+  return output
 
 
 def reuse_variable(var, scope=None):
