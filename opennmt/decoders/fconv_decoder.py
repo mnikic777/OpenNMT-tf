@@ -45,13 +45,27 @@ class FConvDecoder(Decoder):
                        'length equal to the number of layers.')
     self.attention = attention
 
-  def _init_cache(self, memory):
+  def _build_memory_mask(self, memory, memory_sequence_length=None, maxlen=None):
+    if memory_sequence_length is None:
+      return None
+    else:
+      if maxlen is None:
+        maxlen = tf.shape(memory[0])[1]
+      mask = tf.sequence_mask(lengths=memory_sequence_length,
+                              maxlen=maxlen,
+                              dtype=memory[0].dtype)
+      mask = tf.expand_dims(mask, axis=1)
+      return mask
+
+  def _init_cache(self, memory, memory_sequence_length=None):
 
     memory_shape = tf.shape(memory[0])
     batch_size = memory_shape[0]
     src_len = memory_shape[1]
     cache = {
         "memory": memory,
+        "memory_mask": self._build_memory_mask(
+            memory, memory_sequence_length, maxlen=src_len),
         "avg_attn_score": tf.zeros([batch_size, 0, src_len])
     }
 
@@ -70,20 +84,33 @@ class FConvDecoder(Decoder):
                                               scope="proj_to_vocab_size")
 
     def _impl(ids, step, cache):
-      inputs = embedding_fn(ids[:, -1:])
+      inputs = embedding_fn(ids)
       if self.position_encoder is not None:
-        inputs = self.position_encoder.apply_one(inputs, step + 1)
-      outputs = self._cnn_stack(inputs, cache["memory"], mode, cache)
+        inputs = self.position_encoder(inputs)
+      outputs = self._cnn_stack(
+          inputs,
+          memory=cache["memory"],
+          mode=mode,
+          cache=cache)
       outputs = outputs[:, -1:, :]
       logits = output_layer(outputs)
       return logits, cache
 
     return _impl
 
-  def _cnn_stack(self, inputs, memory, mode, cache=None):
+  def _cnn_stack(self, inputs, memory, mode, memory_sequence_length=None, cache=None):
     in_channels = self.convolutions[0][0]
     next_layer = inputs
     num_attn_layers = len(self.attention)
+    memory_mask = None
+
+    if memory is not None:
+      if cache is not None:
+        memory_mask = cache["memory_mask"]
+      elif memory_sequence_length is not None:
+        memory_mask = self._build_memory_mask(
+            memory, memory_sequence_length=memory_sequence_length)
+
     next_layer = linear_weight_norm(next_layer, in_channels, dropout=self.dropout,
                                     scope="in_projection")
     for i, (out_channels, kernel_size) in enumerate(self.convolutions):
@@ -97,14 +124,13 @@ class FConvDecoder(Decoder):
                                         dropout=self.dropout)
         next_layer = glu(next_layer, axis=2)
         if self.attention[i]:
-          next_layer, attn_score = multi_step_attention(next_layer, inputs, memory)
+          next_layer, attn_score = multi_step_attention(next_layer, inputs, memory, mask=memory_mask)
           if cache is not None:
             attn_score /= num_attn_layers
             if i == 0:
               cache["avg_attn_score"] = tf.concat(
-                  [cache["avg_attn_score"], attn_score], axis=1)
-            else:
-              cache["avg_attn_score"] += attn_score
+                  [cache["avg_attn_score"], tf.zeros_like(attn_score[:, -1:])], axis=1)
+            cache["avg_attn_score"] += attn_score
 
         next_layer = (next_layer + residual) * tf.sqrt(0.5)
 
@@ -168,7 +194,7 @@ class FConvDecoder(Decoder):
     inputs = tf.expand_dims(start_tokens, 1)
     lengths = tf.zeros([batch_size], dtype=tf.int32)
     log_probs = tf.zeros([batch_size])
-    cache = self._init_cache(memory)
+    cache = self._init_cache(memory, memory_sequence_length=memory_sequence_length)
 
     symbols_to_logits_fn = self._symbols_to_logits_fn(
         embedding, vocab_size, mode, output_layer=output_layer, dtype=dtype)
@@ -245,7 +271,7 @@ class FConvDecoder(Decoder):
                                 memory_sequence_length=None,
                                 dtype=None,
                                 return_alignment_history=False):
-    cache = self._init_cache(memory)
+    cache = self._init_cache(memory, memory_sequence_length=memory_sequence_length)
     symbols_to_logits_fn = self._symbols_to_logits_fn(
         embedding, vocab_size, mode, output_layer=output_layer, dtype=dtype)
 

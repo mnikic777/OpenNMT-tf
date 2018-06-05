@@ -181,7 +181,7 @@ def conv1d_weight_norm(inputs,
         return layer(inputs)
 
 
-def multi_step_attention(inputs, target_embed, encoder_outs, scope=None):
+def multi_step_attention(inputs, target_embed, encoder_outs, mask=None, scope=None):
     """Computes the multi-step attention as described in
     https://arxiv.org/abs/1705.03122
 
@@ -202,6 +202,8 @@ def multi_step_attention(inputs, target_embed, encoder_outs, scope=None):
       next_layer = (linear_weight_norm(inputs, embedding_dim) + target_embed) * tf.sqrt(0.5)
 
       next_layer = tf.matmul(next_layer, encoder_outs[0], transpose_b=True)
+      if mask is not None:
+        next_layer = next_layer * mask + ((mask - 1.0) * next_layer.dtype.max)
       next_layer = tf.nn.softmax(next_layer)
       attn_score = next_layer
 
