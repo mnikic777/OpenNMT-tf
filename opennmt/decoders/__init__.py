@@ -6,4 +6,5 @@ from opennmt.decoders.rnn_decoder import MultiAttentionalRNNDecoder
 
 from opennmt.decoders.self_attention_decoder import SelfAttentionDecoder
 from opennmt.decoders.fconv_decoder import FConvDecoder
+from opennmt.decoders.rl_decoder import RLDecoder
 

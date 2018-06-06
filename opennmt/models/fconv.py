@@ -6,7 +6,7 @@ import opennmt.constants as constants
 from opennmt.decoders.fconv_decoder import FConvDecoder
 from opennmt.encoders.fconv_encoder import FConvEncoder
 from opennmt.layers.position import LearnedPositionalEmbedding
-from opennmt.models import SequenceToSequence
+from opennmt.models import RLSequenceToSequence
 from opennmt.layers.fconv import shift_padding_tokens_left
 
 
@@ -39,7 +39,7 @@ Returns:
 
 
 
-class FConvModel(SequenceToSequence):
+class FConvModel(RLSequenceToSequence):
   """A convolutional sequence-to-sequence model as described in
   https://arxiv.org/abs/1705.03122."""
 

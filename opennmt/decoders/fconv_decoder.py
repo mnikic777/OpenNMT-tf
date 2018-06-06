@@ -1,6 +1,8 @@
 """Define convolution-based decoders."""
 
 import tensorflow as tf
+from opennmt.decoders.rl_decoder import RLDecoder
+
 from opennmt.decoders.decoder import Decoder, get_embedding_fn
 from opennmt.layers.common import glu, reuse_variable
 from opennmt.layers.fconv import build_linear_weight_norm, build_linear_shared_weights,\
@@ -9,7 +11,7 @@ from opennmt.layers.position import LearnedPositionalEmbedding
 from opennmt.utils import beam_search
 
 
-class FConvDecoder(Decoder):
+class FConvDecoder(RLDecoder):
   """Convolutional decoder as described in https://arxiv.org/abs/1705.03122."""
 
   def __init__(self,
@@ -95,7 +97,6 @@ class FConvDecoder(Decoder):
       outputs = outputs[:, -1:, :]
       logits = output_layer(outputs)
       return logits, cache
-
     return _impl
 
   def _cnn_stack(self, inputs, memory, mode, memory_sequence_length=None, cache=None):
@@ -141,6 +142,72 @@ class FConvDecoder(Decoder):
 
     return next_layer
 
+  def _rl_decode(self,
+                 is_multinomial,
+                 embedding,
+                 start_tokens,
+                 sequence_length,
+                 vocab_size=None,
+                 output_layer=None,
+                 mode=tf.estimator.ModeKeys.PREDICT,
+                 memory=None,
+                 memory_sequence_length=None,
+                 dtype=None):
+    batch_size = tf.shape(start_tokens)[0]
+    finished = tf.tile([False], [batch_size])
+    step = tf.constant(0)
+    inputs = tf.expand_dims(start_tokens, 1)
+    lengths = tf.zeros([batch_size], dtype=tf.int32)
+    logits = tf.zeros([batch_size, 0, vocab_size], dtype=dtype)
+    maximum_length = tf.reduce_max(sequence_length)
+    maximum_length = tf.Print(maximum_length, [maximum_length], "maxlen = ")
+    cache = self._init_cache(memory, memory_sequence_length)
+    symbols_to_logits_fn = self._symbols_to_logits_fn(
+      embedding, vocab_size, mode, output_layer=output_layer, dtype=dtype)
+
+    def _condition(unused_step, finished, unused_inputs, unused_lengths, unused_logits, unused_cache):
+      return tf.logical_not(tf.reduce_all(finished))
+
+    def _body(step, finished, inputs, lengths, curr_logits, cache):
+      inputs_lengths = tf.add(lengths, 1 - tf.cast(finished, lengths.dtype))
+
+      logits, _ = symbols_to_logits_fn(inputs, step, cache)
+      probs = tf.nn.log_softmax(logits)
+      sample_ids = tf.multinomial(probs[:, -1, :], 1) if is_multinomial else tf.argmax(probs, axis=-1)
+
+      # Accumulate log probabilities
+      next_inputs = tf.concat([inputs, tf.cast(sample_ids, inputs.dtype)], -1)
+      next_logits = tf.concat([curr_logits, logits], axis=1)
+      next_lengths = inputs_lengths
+      step = step + 1
+
+      next_finished = tf.logical_or(
+        finished, step >= maximum_length)
+
+      return step, next_finished, next_inputs, next_lengths, next_logits, cache
+
+    step, _, outputs, lengths, logits, _ = tf.while_loop(
+      _condition,
+      _body,
+      loop_vars=(step, finished, inputs, lengths, logits, cache),
+      shape_invariants=(
+        tf.TensorShape([]),
+        finished.get_shape(),
+        tf.TensorShape([None, None]),
+        lengths.get_shape(),
+        tf.TensorShape([None, None, None]),
+        tf.contrib.framework.nest.map_structure(
+          beam_search.get_state_shape_invariants, cache)
+      ),
+      parallel_iterations=1)
+
+    out_mask = tf.sequence_mask(sequence_length, maxlen=maximum_length, dtype=outputs.dtype)
+    out_mask = tf.Print(out_mask, [tf.shape(out_mask)], "out_mask = ")
+    outputs = outputs[:, :-1]
+    outputs = outputs * out_mask
+
+    return outputs, logits
+
   def decode(self,
              inputs,
              sequence_length,
@@ -159,7 +226,7 @@ class FConvDecoder(Decoder):
     if self.position_encoder is not None:
       inputs = self.position_encoder(inputs, sequence_length=sequence_length)
 
-    outputs = self._cnn_stack(inputs, memory, mode)
+    outputs = self._cnn_stack(inputs, memory, mode, memory_sequence_length)
 
     if self.share_embedding:
       w_embs = reuse_variable("w_embs")
@@ -255,6 +322,40 @@ class FConvDecoder(Decoder):
       alignment_history = tf.expand_dims(cache["avg_attn_score"], 1)
       return (outputs, None, lengths, log_probs, alignment_history)
     return (outputs, None, lengths, log_probs)
+
+  def greedy_decode(self,
+                    embedding,
+                    start_tokens,
+                    end_token,
+                    sequence_length,
+                    vocab_size=None,
+                    initial_state=None,
+                    output_layer=None,
+                    mode=tf.estimator.ModeKeys.TRAIN,
+                    memory=None,
+                    memory_sequence_length=None,
+                    dtype=None):
+    outputs, _ = self._rl_decode(is_multinomial=False, embedding=embedding, start_tokens=start_tokens,
+                                 sequence_length=sequence_length, vocab_size=vocab_size, output_layer=output_layer,
+                                 mode=mode, memory=memory, memory_sequence_length=memory_sequence_length, dtype=dtype)
+    return outputs
+
+  def sampling_decode(self,
+                      embedding,
+                      start_tokens,
+                      end_token,
+                      sequence_length,
+                      vocab_size=None,
+                      initial_state=None,
+                      output_layer=None,
+                      mode=tf.estimator.ModeKeys.TRAIN,
+                      memory=None,
+                      memory_sequence_length=None,
+                      dtype=None,
+                      sampling_function=tf.multinomial):
+    return self._rl_decode(is_multinomial=True, embedding=embedding, start_tokens=start_tokens,
+                           sequence_length=sequence_length, vocab_size=vocab_size, output_layer=output_layer,
+                           mode=mode, memory=memory, memory_sequence_length=memory_sequence_length, dtype=dtype)
 
   def dynamic_decode_and_search(self,
                                 embedding,
