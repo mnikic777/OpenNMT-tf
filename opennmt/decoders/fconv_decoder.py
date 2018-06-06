@@ -147,6 +147,7 @@ class FConvDecoder(RLDecoder):
                  embedding,
                  start_tokens,
                  sequence_length,
+                 maximum_length,
                  vocab_size=None,
                  output_layer=None,
                  mode=tf.estimator.ModeKeys.PREDICT,
@@ -159,7 +160,6 @@ class FConvDecoder(RLDecoder):
     inputs = tf.expand_dims(start_tokens, 1)
     lengths = tf.zeros([batch_size], dtype=tf.int32)
     logits = tf.zeros([batch_size, 0, vocab_size], dtype=dtype)
-    maximum_length = tf.reduce_max(sequence_length)
     maximum_length = tf.Print(maximum_length, [maximum_length], "maxlen = ")
     cache = self._init_cache(memory, memory_sequence_length)
     symbols_to_logits_fn = self._symbols_to_logits_fn(
@@ -328,6 +328,7 @@ class FConvDecoder(RLDecoder):
                     start_tokens,
                     end_token,
                     sequence_length,
+                    maximum_length,
                     vocab_size=None,
                     initial_state=None,
                     output_layer=None,
@@ -336,8 +337,9 @@ class FConvDecoder(RLDecoder):
                     memory_sequence_length=None,
                     dtype=None):
     outputs, _ = self._rl_decode(is_multinomial=False, embedding=embedding, start_tokens=start_tokens,
-                                 sequence_length=sequence_length, vocab_size=vocab_size, output_layer=output_layer,
-                                 mode=mode, memory=memory, memory_sequence_length=memory_sequence_length, dtype=dtype)
+                                 sequence_length=sequence_length, maximum_length=maximum_length, vocab_size=vocab_size,
+                                 output_layer=output_layer, mode=mode, memory=memory,
+                                 memory_sequence_length=memory_sequence_length, dtype=dtype)
     return outputs
 
   def sampling_decode(self,
@@ -345,6 +347,7 @@ class FConvDecoder(RLDecoder):
                       start_tokens,
                       end_token,
                       sequence_length,
+                      maximum_length,
                       vocab_size=None,
                       initial_state=None,
                       output_layer=None,
@@ -354,8 +357,9 @@ class FConvDecoder(RLDecoder):
                       dtype=None,
                       sampling_function=tf.multinomial):
     return self._rl_decode(is_multinomial=True, embedding=embedding, start_tokens=start_tokens,
-                           sequence_length=sequence_length, vocab_size=vocab_size, output_layer=output_layer,
-                           mode=mode, memory=memory, memory_sequence_length=memory_sequence_length, dtype=dtype)
+                           sequence_length=sequence_length, maximum_length=maximum_length, vocab_size=vocab_size,
+                           output_layer=output_layer, mode=mode, memory=memory,
+                           memory_sequence_length=memory_sequence_length, dtype=dtype)
 
   def dynamic_decode_and_search(self,
                                 embedding,
