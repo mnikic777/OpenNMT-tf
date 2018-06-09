@@ -173,7 +173,7 @@ class FConvDecoder(RLDecoder):
     symbols_to_logits_fn = self._symbols_to_logits_fn(
       embedding, vocab_size, mode, output_layer=output_layer, dtype=dtype)
     batch_nums = tf.expand_dims(tf.range(0, limit=batch_size), axis=1)
-    loss = tf.zeros([batch_size], dtype=dtype)
+    loss = tf.zeros([batch_size, 1], dtype=dtype)
 
 
     def _condition(unused_step, finished, unused_inputs, unused_lengths, unused_logits, unused_cache):
@@ -193,8 +193,7 @@ class FConvDecoder(RLDecoder):
 
       # Accumulate log probabilities
       next_inputs = tf.concat([inputs, sample_ids], -1)
-      next_loss = loss + tf.log(gold_probs)
-      next_loss.set_shape(loss.get_shape())
+      next_loss = tf.concat([loss, tf.expand_dims(tf.log(gold_probs), 1)], axis=1)
       next_lengths = inputs_lengths
       step = step + 1
 
@@ -212,7 +211,7 @@ class FConvDecoder(RLDecoder):
         finished.get_shape(),
         tf.TensorShape([None, None]),
         lengths.get_shape(),
-        tf.TensorShape([None]),
+        tf.TensorShape([None, None]),
         tf.contrib.framework.nest.map_structure(
           beam_search.get_state_shape_invariants, cache)
       ),
@@ -221,6 +220,7 @@ class FConvDecoder(RLDecoder):
     out_mask = tf.sequence_mask(sequence_length, maxlen=maximum_length, dtype=outputs.dtype)
     outputs = outputs[:, :-1]
     outputs = outputs * out_mask
+    loss = loss[:, 1:] * tf.cast(out_mask, dtype=loss.dtype)
     loss = tf.reduce_sum(loss)
 
     return outputs, loss
