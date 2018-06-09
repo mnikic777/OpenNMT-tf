@@ -190,7 +190,8 @@ class LearnedPositionalEmbedding(PositionEncoder):
     embeddings_grad_mask = tf.concat([tf.zeros(shape=[1, depth], dtype=dtype), tf.ones(
         shape=[self.maximum_position, depth], dtype=dtype)], axis=0)
     embeddings = tf.get_variable(
-        "w_embs", shape=[self.maximum_position + 1, depth], dtype=dtype)
+        "w_embs", shape=[self.maximum_position + 1, depth], dtype=dtype,
+        initializer=tf.random_normal_initializer(0, 0.1))
     # The gradient for vector at the position of padding is always zero.
     embeddings = scale_gradient(embeddings, embeddings_grad_mask)
     return embedding_lookup(embeddings, positions)
