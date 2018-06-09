@@ -85,7 +85,7 @@ def cross_entropy_loss(logits,
   return loss, loss_normalizer
 
 def cross_entropy_sequence_loss_rl(logits_true,
-                                   logits_sample,
+                                   loss_sample,
                                    reward_true,
                                    reward_sample,
                                    labels,
@@ -98,9 +98,8 @@ def cross_entropy_sequence_loss_rl(logits_true,
   max_time = tf.shape(logits_true)[1]
 
   cross_entropy_true = _softmax_cross_entropy(logits_true, labels, label_smoothing, mode)
-  cross_entropy_sample = _softmax_cross_entropy(logits_sample, labels, label_smoothing, mode)
-  cross_entropy_sample *= reward_sample - reward_true
-  cross_entropy = (1.0 - scaling_factor) * cross_entropy_true + scaling_factor * cross_entropy_sample
+  loss_sample *= reward_sample - reward_true
+  cross_entropy = (1.0 - scaling_factor) * cross_entropy_true + scaling_factor * loss_sample
 
   weights = tf.sequence_mask(
       sequence_length, maxlen=max_time, dtype=cross_entropy_true.dtype)

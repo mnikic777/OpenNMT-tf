@@ -67,7 +67,7 @@ class RLSequenceToSequence(SequenceToSequence):
               memory=encoder_outputs,
               memory_sequence_length=encoder_sequence_length,
               dtype=target_dtype)
-            outputs_sample, logits_sample = self.decoder.sampling_decode(
+            outputs_sample, loss_sample = self.decoder.sampling_decode(
               self._scoped_target_embedding_fn(mode, decoder_scope),
               start_tokens,
               end_token,
@@ -81,7 +81,7 @@ class RLSequenceToSequence(SequenceToSequence):
               dtype=target_dtype)
             reward_sample = approximate_bleu(outputs_sample, labels["ids"])
             reward_true = approximate_bleu(outputs_greedy, labels["ids"])
-            logits = (logits, logits_sample, reward_true, reward_sample)
+            logits = (logits, loss_sample, reward_true, reward_sample)
       else:
         logits = None
 
@@ -162,11 +162,11 @@ class RLSequenceToSequence(SequenceToSequence):
 
   def _compute_loss(self, features, labels, outputs, params, mode):
     if params.get("rl_mode", False):
-      logits, logits_sample, reward_true, reward_sample = outputs
-      logits = tf.Print(logits, [tf.shape(logits), tf.shape(logits_sample)], "shapes = ", summarize=1000)
+      logits, loss_sample, reward_true, reward_sample = outputs
+      logits = tf.Print(logits, [tf.shape(logits), tf.shape(loss_sample)], "shapes = ", summarize=1000)
       return cross_entropy_sequence_loss_rl(
         logits,
-        logits_sample,
+        loss_sample,
         reward_true,
         reward_sample,
         labels["ids_out"],

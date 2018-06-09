@@ -169,43 +169,50 @@ class FConvDecoder(RLDecoder):
     step = tf.constant(0)
     inputs = tf.expand_dims(start_tokens, 1)
     lengths = tf.zeros([batch_size], dtype=tf.int32)
-    logits = tf.zeros([batch_size, 0, vocab_size], dtype=dtype)
-    maximum_length = tf.Print(maximum_length, [maximum_length], "maxlen = ")
     cache = self._init_cache(memory, memory_sequence_length)
     symbols_to_logits_fn = self._symbols_to_logits_fn(
       embedding, vocab_size, mode, output_layer=output_layer, dtype=dtype)
+    batch_nums = tf.expand_dims(tf.range(0, limit=batch_size), axis=1)
+    loss = tf.zeros([batch_size], dtype=dtype)
+
 
     def _condition(unused_step, finished, unused_inputs, unused_lengths, unused_logits, unused_cache):
       return tf.logical_not(tf.reduce_all(finished))
 
-    def _body(step, finished, inputs, lengths, curr_logits, cache):
+    def _body(step, finished, inputs, lengths, loss, cache):
       inputs_lengths = tf.add(lengths, 1 - tf.cast(finished, lengths.dtype))
 
       logits, _ = symbols_to_logits_fn(inputs, step, cache)
-      probs = tf.nn.log_softmax(logits)
-      sample_ids = tf.multinomial(probs[:, -1, :], 1) if is_multinomial else tf.argmax(probs, axis=-1)
+      probs = tf.nn.softmax(logits)
+      sample_ids = tf.multinomial(tf.squeeze(probs, axis=1), 1) if is_multinomial else tf.argmax(probs, axis=-1)
+      sample_ids = tf.cast(sample_ids, inputs.dtype)
+
+      indices = tf.concat([batch_nums, sample_ids], axis=1)
+      gold_probs = tf.gather_nd(tf.squeeze(probs, axis=1), indices)
+
 
       # Accumulate log probabilities
-      next_inputs = tf.concat([inputs, tf.cast(sample_ids, inputs.dtype)], -1)
-      next_logits = tf.concat([curr_logits, logits], axis=1)
+      next_inputs = tf.concat([inputs, sample_ids], -1)
+      next_loss = loss + tf.log(gold_probs)
+      next_loss.set_shape(loss.get_shape())
       next_lengths = inputs_lengths
       step = step + 1
 
       next_finished = tf.logical_or(
         finished, step >= maximum_length)
 
-      return step, next_finished, next_inputs, next_lengths, next_logits, cache
+      return step, next_finished, next_inputs, next_lengths, next_loss, cache
 
-    step, _, outputs, lengths, logits, _ = tf.while_loop(
+    step, _, outputs, lengths, loss, _ = tf.while_loop(
       _condition,
       _body,
-      loop_vars=(step, finished, inputs, lengths, logits, cache),
+      loop_vars=(step, finished, inputs, lengths, loss, cache),
       shape_invariants=(
         tf.TensorShape([]),
         finished.get_shape(),
         tf.TensorShape([None, None]),
         lengths.get_shape(),
-        tf.TensorShape([None, None, None]),
+        tf.TensorShape([None]),
         tf.contrib.framework.nest.map_structure(
           beam_search.get_state_shape_invariants, cache)
       ),
@@ -216,7 +223,7 @@ class FConvDecoder(RLDecoder):
     outputs = outputs[:, :-1]
     outputs = outputs * out_mask
 
-    return outputs, logits
+    return outputs, loss
 
   def decode(self,
              inputs,
