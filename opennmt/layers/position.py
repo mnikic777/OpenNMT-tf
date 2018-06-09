@@ -8,8 +8,6 @@ import tensorflow as tf
 
 from opennmt.layers.reducer import SumReducer
 from opennmt.layers.common import embedding_lookup, scale_gradient
-from opennmt.layers.fconv import shift_padding_tokens_left
-
 
 def make_positions(sequence_length, maximum_length=None):
   """Builds a sequence of positions.
@@ -167,8 +165,7 @@ class LearnedPositionalEmbedding(PositionEncoder):
 
   def __init__(self,
                maximum_position=1024,
-               reducer=SumReducer(),
-               left_pad=True):
+               reducer=SumReducer()):
     """Initializes the position encoder.
 
   Args:
@@ -176,11 +173,9 @@ class LearnedPositionalEmbedding(PositionEncoder):
     than this value will be set to :obj:`maximum_position`.
       reducer: A :class:`opennmt.layers.reducer.Reducer` to merge inputs and
     position encodings.
-      left_pad: If true, padding is added on the left side; otherwise on the right side.
   """
     super(LearnedPositionalEmbedding, self).__init__(reducer=reducer)
     self.maximum_position = maximum_position
-    self.left_pad = left_pad
 
   def encode_sequence(self,
                       sequence_length,
@@ -188,8 +183,6 @@ class LearnedPositionalEmbedding(PositionEncoder):
                       maximum_length=None,
                       dtype=tf.float32):
     positions = make_positions(sequence_length, maximum_length=maximum_length)
-    if self.left_pad:
-      positions = shift_padding_tokens_left(positions, sequence_length)
     return self.encode(positions, depth, dtype=dtype)
 
   def encode(self, positions, depth, dtype=tf.float32):

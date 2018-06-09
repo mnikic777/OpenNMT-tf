@@ -94,23 +94,6 @@ class FConvTest(tf.test.TestCase):
       self.assertAllEqual(
           [batch_size, max_tgt_len, max_src_len], attn_score.shape)
 
-  def testShiftPaddingTokensLeft(self):
-    inputs = [
-        [1, 2, 3, 4, 5],
-        [1, 2, 3, 0, 0],
-        [1, 2, 0, 0, 0],
-    ]
-    expected = [
-        [1, 2, 3, 4, 5],
-        [0, 0, 1, 2, 3],
-        [0, 0, 0, 1, 2],
-    ]
-    inputs = tf.constant(inputs)
-    with self.test_session() as sess:
-      outputs = sess.run(fconv.shift_padding_tokens_left(
-          inputs, tf.constant([5, 3, 2])))
-      self.assertAllEqual(outputs, expected)
-
 
 if __name__ == "__main__":
   tf.test.main()

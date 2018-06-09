@@ -2,6 +2,8 @@
 import math
 
 import tensorflow as tf
+from opennmt.layers.linearized_conv import LinearizedConvolution
+
 from opennmt.layers.weight_norm import weight_norm
 
 
@@ -150,36 +152,41 @@ def conv1d_weight_norm(inputs,
         raise ValueError("num_outputs must be set to build the output layer")
     kernel_initializer = tf.random_normal_initializer(
         mean=0, stddev=math.sqrt((4 * (1.0 - dropout)) / (kernel_size * num_inputs)))
-    if not (isinstance(padding, str) and padding.upper() in ["SAME", "VALID"]):
-        if isinstance(padding, int):
-            layer = weight_norm(tf.layers.Conv1D(filters=num_outputs,
-                                                 kernel_size=kernel_size,
-                                                 padding="VALID",
-                                                 use_bias=True,
-                                                 kernel_initializer=kernel_initializer,
-                                                 _scope=scope),
-                                axis=[0, 1])
-            layer.build([None, None, num_inputs])
+    layer = weight_norm(
+        tf.layers.Conv1D(
+            filters=num_outputs,
+            kernel_size=kernel_size,
+            padding=padding,
+            use_bias=True,
+            kernel_initializer=kernel_initializer,
+            _scope=scope),
+        axis=[0, 1])
+    layer.build([None, None, num_inputs])
+    return layer(inputs)
 
-            # remove future information
-            outputs = tf.pad(tensor=inputs, paddings=[[0, 0], [padding, padding], [0, 0]])
-            return layer(outputs)[:, :-padding, :]
-
-        else:
-            raise ValueError("padding must be VALID, SAME, or integer!")
-    else:
-        layer = weight_norm(
-            tf.layers.Conv1D(
-                filters=num_outputs,
-                kernel_size=kernel_size,
-                padding=padding,
-                use_bias=True,
-                kernel_initializer=kernel_initializer,
-                _scope=scope),
-            axis=[0, 1])
-        layer.build([None, None, num_inputs])
-        return layer(inputs)
-
+def linearized_conv1d(inputs,
+                       num_outputs,
+                       kernel_size,
+                       dropout=0.0,
+                       padding="SAME",
+                       scope=None,
+                       cache=None):
+  num_inputs = inputs.get_shape().as_list()[-1]
+  if num_outputs is None:
+    raise ValueError("num_outputs must be set to build the output layer")
+  kernel_initializer = tf.random_normal_initializer(
+    mean=0, stddev=math.sqrt((4 * (1.0 - dropout)) / (kernel_size * num_inputs)), seed=301)
+  layer = weight_norm(
+    LinearizedConvolution(
+      filters=num_outputs,
+      kernel_size=kernel_size,
+      padding=padding,
+      use_bias=True,
+      kernel_initializer=kernel_initializer,
+      _scope=scope),
+    axis=[0, 1])
+  layer.build([None, None, num_inputs])
+  return layer(inputs, cache=cache)
 
 def multi_step_attention(inputs, target_embed, encoder_outs, mask=None, scope=None):
     """Computes the multi-step attention as described in
