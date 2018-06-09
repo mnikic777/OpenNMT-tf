@@ -222,6 +222,7 @@ class FConvDecoder(RLDecoder):
     out_mask = tf.Print(out_mask, [tf.shape(out_mask)], "out_mask = ")
     outputs = outputs[:, :-1]
     outputs = outputs * out_mask
+    loss = tf.reduce_sum(loss)
 
     return outputs, loss
 

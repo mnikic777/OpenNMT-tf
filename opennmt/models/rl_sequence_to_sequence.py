@@ -182,5 +182,6 @@ class RLSequenceToSequence(SequenceToSequence):
 def approximate_bleu(outputs, labels):
   bleu = tf.py_func(compute_bleu, (labels, outputs), tf.float32)
   bleu.set_shape(1)
+  bleu = tf.squeeze(bleu)
   return bleu
 
