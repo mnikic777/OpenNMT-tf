@@ -163,7 +163,6 @@ class RLSequenceToSequence(SequenceToSequence):
   def _compute_loss(self, features, labels, outputs, params, mode):
     if params.get("rl_mode", False):
       logits, loss_sample, reward_true, reward_sample = outputs
-      logits = tf.Print(logits, [tf.shape(logits), tf.shape(loss_sample)], "shapes = ", summarize=1000)
       return cross_entropy_sequence_loss_rl(
         logits,
         loss_sample,

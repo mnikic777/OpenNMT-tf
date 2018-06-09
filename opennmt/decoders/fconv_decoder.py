@@ -219,7 +219,6 @@ class FConvDecoder(RLDecoder):
       parallel_iterations=1)
 
     out_mask = tf.sequence_mask(sequence_length, maxlen=maximum_length, dtype=outputs.dtype)
-    out_mask = tf.Print(out_mask, [tf.shape(out_mask)], "out_mask = ")
     outputs = outputs[:, :-1]
     outputs = outputs * out_mask
     loss = tf.reduce_sum(loss)
