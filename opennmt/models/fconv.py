@@ -51,8 +51,7 @@ class FConvModel(SequenceToSequence):
                attention=True,
                dropout=0.1,
                encoder_position_encoder=LearnedPositionalEmbedding(),
-               decoder_positon_encoder=LearnedPositionalEmbedding(
-                   left_pad=False),
+               decoder_position_encoder=LearnedPositionalEmbedding(),
                out_embedding_dim=512,
                share_embeddings=False,
                name="fairseq"):
@@ -70,7 +69,7 @@ class FConvModel(SequenceToSequence):
         dropout: The probability to drop units in each layer output.
         encoder_position_encoder: A :class:`opennmt.layers.position.PositionEncoder` to
             apply on the encoder inputs.
-        decoder_positon_encoder: A :class:`opennmt.layers.position.PositionEncoder` to
+        decoder_position_encoder: A :class:`opennmt.layers.position.PositionEncoder` to
             apply on the decoder inputs.
         out_embedding_dim: Decoder output embedding dimension.
         share_embeddings: Share input and output embeddings (requires decoder embedding dimension
@@ -78,9 +77,6 @@ class FConvModel(SequenceToSequence):
         daisy_chain_variables:
         name: The name of this model.
     """
-    constants.START_OF_SENTENCE_ID = constants.END_OF_SENTENCE_ID
-    constants.START_OF_SENTENCE_TOKEN = constants.END_OF_SENTENCE_TOKEN
-
     with tf.variable_scope("encoder"):
         encoder = FConvEncoder(convolutions=encoder_convolutions,
                                dropout=dropout,
@@ -90,7 +86,7 @@ class FConvModel(SequenceToSequence):
                                convolutions=decoder_convolutions,
                                attention=attention,
                                dropout=dropout,
-                               position_encoder=decoder_positon_encoder,
+                               position_encoder=decoder_position_encoder,
                                share_embedding=share_embeddings)
     encoder.num_attention_layers = sum(
         layer is not None for layer in decoder.attention)
@@ -102,8 +98,3 @@ class FConvModel(SequenceToSequence):
                                       name=name)
     self.source_inputter.add_process_hooks(
         [shift_source_sequence])
-
-  def _build(self, features, labels, params, mode, config=None):
-    features_length = self._get_features_length(features)
-    features["ids"] = shift_padding_tokens_left(features["ids"], features_length)
-    return super(FConvModel, self)._build(features, labels, params, mode, config=config)

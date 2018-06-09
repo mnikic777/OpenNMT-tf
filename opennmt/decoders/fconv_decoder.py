@@ -3,8 +3,8 @@
 import tensorflow as tf
 from opennmt.decoders.decoder import Decoder, get_embedding_fn
 from opennmt.layers.common import glu, reuse_variable
-from opennmt.layers.fconv import build_linear_weight_norm, build_linear_shared_weights,\
-    linear_weight_norm, conv1d_weight_norm, multi_step_attention
+from opennmt.layers.fconv import build_linear_weight_norm, build_linear_shared_weights, \
+  linear_weight_norm, conv1d_weight_norm, multi_step_attention, linearized_conv1d
 from opennmt.layers.position import LearnedPositionalEmbedding
 from opennmt.utils import beam_search
 
@@ -17,7 +17,7 @@ class FConvDecoder(Decoder):
                convolutions=((512, 3),) * 20,
                attention=True,
                dropout=0.1,
-               position_encoder=LearnedPositionalEmbedding(left_pad=False),
+               position_encoder=LearnedPositionalEmbedding(),
                share_embedding=False):
     """Initializes the parameters of the decoder.
 
@@ -63,11 +63,16 @@ class FConvDecoder(Decoder):
     batch_size = memory_shape[0]
     src_len = memory_shape[1]
     cache = {
-        "memory": memory,
-        "memory_mask": self._build_memory_mask(
-            memory, memory_sequence_length, maxlen=src_len),
-        "avg_attn_score": tf.zeros([batch_size, 0, src_len])
+      "memory": memory,
+      "memory_mask": self._build_memory_mask(
+          memory, memory_sequence_length, maxlen=src_len),
+      "avg_attn_scores": tf.zeros([batch_size, 0, src_len])
     }
+
+    for l, (out_channels, kernel_size) in enumerate(self.convolutions):
+      cache["layer_{}".format(l)] = {
+        "incremental_state": tf.zeros([batch_size, kernel_size, out_channels])
+      }
 
     return cache
 
@@ -84,9 +89,9 @@ class FConvDecoder(Decoder):
                                               scope="proj_to_vocab_size")
 
     def _impl(ids, step, cache):
-      inputs = embedding_fn(ids)
+      inputs = embedding_fn(ids[:, -1:])
       if self.position_encoder is not None:
-        inputs = self.position_encoder(inputs)
+        inputs = self.position_encoder.apply_one(inputs, step + 1)
       outputs = self._cnn_stack(
           inputs,
           memory=cache["memory"],
@@ -102,6 +107,7 @@ class FConvDecoder(Decoder):
     in_channels = self.convolutions[0][0]
     next_layer = inputs
     num_attn_layers = len(self.attention)
+    avg_attn_scores = None
     memory_mask = None
 
     if memory is not None:
@@ -113,24 +119,26 @@ class FConvDecoder(Decoder):
 
     next_layer = linear_weight_norm(next_layer, in_channels, dropout=self.dropout,
                                     scope="in_projection")
-    for i, (out_channels, kernel_size) in enumerate(self.convolutions):
-      with tf.variable_scope("layer_{}".format(i)):
+    for l, (out_channels, kernel_size) in enumerate(self.convolutions):
+      layer_name = "layer_{}".format(l)
+      conv_layer_cache = cache[layer_name] if cache is not None else None
+      with tf.variable_scope(layer_name):
         residual = next_layer if in_channels == out_channels else linear_weight_norm(next_layer, out_channels)
 
         next_layer = tf.layers.dropout(next_layer, self.dropout,
                                        training=mode == tf.estimator.ModeKeys.TRAIN)
-        next_layer = conv1d_weight_norm(next_layer, out_channels * 2, kernel_size,
+        next_layer = linearized_conv1d(next_layer, out_channels * 2, kernel_size,
                                         padding=(kernel_size - 1),
-                                        dropout=self.dropout)
+                                        dropout=self.dropout, cache=conv_layer_cache)
         next_layer = glu(next_layer, axis=2)
-        if self.attention[i]:
-          next_layer, attn_score = multi_step_attention(next_layer, inputs, memory, mask=memory_mask)
+        if self.attention[l]:
+          next_layer, attn_scores = multi_step_attention(next_layer, inputs, memory, mask=memory_mask)
           if cache is not None:
-            attn_score /= num_attn_layers
-            if i == 0:
-              cache["avg_attn_score"] = tf.concat(
-                  [cache["avg_attn_score"], tf.zeros_like(attn_score[:, -1:])], axis=1)
-            cache["avg_attn_score"] += attn_score
+            attn_scores /= num_attn_layers
+            if avg_attn_scores is None:
+              avg_attn_scores = attn_scores
+            else:
+              avg_attn_scores += attn_scores
 
         next_layer = (next_layer + residual) * tf.sqrt(0.5)
 
@@ -138,6 +146,8 @@ class FConvDecoder(Decoder):
                                     scope="out_projection")
     next_layer = tf.layers.dropout(next_layer, rate=self.dropout,
                                    training=mode == tf.estimator.ModeKeys.TRAIN)
+    if cache is not None:
+      cache["avg_attn_scores"] = tf.concat([cache["avg_attn_scores"], avg_attn_scores], axis=1)
 
     return next_layer
 
@@ -252,7 +262,8 @@ class FConvDecoder(Decoder):
     log_probs = tf.expand_dims(log_probs, 1)
 
     if return_alignment_history:
-      alignment_history = tf.expand_dims(cache["avg_attn_score"], 1)
+      cache["avg_attn_scores"] = cache["avg_attn_scores"][:, :, :-1]
+      alignment_history = tf.expand_dims(cache["avg_attn_scores"], 1)
       return (outputs, None, lengths, log_probs, alignment_history)
     return (outputs, None, lengths, log_probs)
 
@@ -292,6 +303,7 @@ class FConvDecoder(Decoder):
     lengths = tf.reduce_sum(lengths, axis=-1)
 
     if return_alignment_history:
-      alignment_history = cache["avg_attn_score"]
+      cache["avg_attn_scores"] = cache["avg_attn_scores"][:, :, :-1]
+      alignment_history = cache["avg_attn_scores"]
       return (outputs, None, lengths, log_probs, alignment_history)
     return (outputs, None, lengths, log_probs)
