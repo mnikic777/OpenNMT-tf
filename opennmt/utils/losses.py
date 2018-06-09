@@ -101,7 +101,10 @@ def cross_entropy_sequence_loss_rl(logits_true,
   weights = tf.sequence_mask(
       sequence_length, maxlen=max_time, dtype=cross_entropy.dtype)
   loss = tf.reduce_sum(cross_entropy * weights)
+  loss = tf.Print(loss, [loss], "loss_true = ")
+  loss = tf.Print(loss, [loss_sample], "loss_sample_prije = ")
   loss_sample *= reward_sample - reward_true
+  loss = tf.Print(loss, [loss_sample], "loss_nakon = ")
   loss = (1.0 - scaling_factor) * loss + scaling_factor * loss_sample
   loss_token_normalizer = tf.reduce_sum(weights)
 
