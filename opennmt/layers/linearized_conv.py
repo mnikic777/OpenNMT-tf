@@ -24,7 +24,10 @@ class LinearizedConvolution(Conv1D):
     if cache is None:
       if self.padding_value is not None:
         inputs = array_ops.pad(tensor=inputs, paddings=[[0, 0], [self.padding_value, self.padding_value], [0, 0]])
-      return super().call(inputs)[:, :-self.padding_value, :]
+      outputs = super().call(inputs)
+      if self.kernel_size[0] > 1 and self.padding_value > 0:
+        outputs = outputs[:, :-self.padding_value, :]
+      return outputs
 
     weight = self._get_linearized_weight()
     batch_size = array_ops.shape(inputs)[0]
